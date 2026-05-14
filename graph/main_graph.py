@@ -1,52 +1,44 @@
+"""Main supervisor graph: intake → supervisor → domain subgraph → end.
+
+The supervisor receives the customer request after intake, classifies it into
+one of 7 domains using the LangGraph Command API, and dispatches to the
+corresponding compiled subgraph node.  Each subgraph handles its own internal
+routing and error recovery.
+
+Architecture::
+
+    intake ──→ supervisor ──→ claims        ──→ END
+                          ├──→ underwriting  ──→ END
+                          ├──→ billing       ──→ END
+                          ├──→ marketing     ──→ END
+                          ├──→ renewals      ──→ END
+                          ├──→ onboarding    ──→ END
+                          ├──→ support       ──→ END
+                          └──→ error_node    ──→ END
+"""
 from __future__ import annotations
 
 import os
-from typing import Literal
 
-from langgraph.graph import END, START, StateGraph
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.graph import END, START, StateGraph
 
-from agents import (
-    approval_node,
-    claims_node,
-    error_node,
-    fraud_node,
-    human_review_node,
-    intake_node,
-    router_node,
-    support_node,
-    underwriting_node,
-)
+from agents.error import error_node
+from agents.intake import intake_node
+from agents.supervisor import supervisor_node
+from agents.support import support_node
+from graph.billing_graph import billing_graph
+from graph.claims_graph import claims_graph
+from graph.marketing_graph import marketing_graph
+from graph.onboarding_graph import onboarding_graph
+from graph.renewals_graph import renewals_graph
+from graph.underwriting_graph import underwriting_graph
 from schema.state import GlobalState
 
 
-# ── Routing functions ────────────────────────────────────────────────────────
-
-def route_by_intent(
-    state: GlobalState,
-) -> Literal["claims", "underwriting", "support", "error"]:
-    if state.error:
-        return "error"
-    return state.intent or "error"  # type: ignore[return-value]
-
-
-def route_after_claims(state: GlobalState) -> Literal["fraud", "error"]:
-    return "error" if state.error else "fraud"
-
-
-def route_after_fraud(state: GlobalState) -> Literal["approval", "error"]:
-    return "error" if (state.error or state.fraud_flags) else "approval"
-
-
-def route_after_approval(state: GlobalState) -> Literal["human_review", "__end__"]:
-    return "human_review" if state.requires_human_review else END  # type: ignore[return-value]
-
-
-# ── Graph builder ────────────────────────────────────────────────────────────
-
 def build_graph(checkpointer=None):
-    """Assemble and compile the insurance workflow graph.
+    """Assemble and compile the full autonomous insurance supervisor graph.
 
     Args:
         checkpointer: Optional LangGraph checkpointer for state persistence
@@ -72,40 +64,31 @@ def build_graph(checkpointer=None):
 
     builder = StateGraph(GlobalState)
 
+    # ── Entry nodes ───────────────────────────────────────────────────────────
     builder.add_node("intake", intake_node)
-    builder.add_node("router", router_node)
-    builder.add_node("claims", claims_node)
-    builder.add_node("underwriting", underwriting_node)
-    builder.add_node("fraud", fraud_node)
-    builder.add_node("approval", approval_node)
-    builder.add_node("human_review", human_review_node)
-    builder.add_node("support", support_node)
-    builder.add_node("error", error_node)
+    builder.add_node("supervisor", supervisor_node)
 
+    # ── Domain subgraph nodes ─────────────────────────────────────────────────
+    builder.add_node("claims", claims_graph)
+    builder.add_node("underwriting", underwriting_graph)
+    builder.add_node("billing", billing_graph)
+    builder.add_node("marketing", marketing_graph)
+    builder.add_node("renewals", renewals_graph)
+    builder.add_node("onboarding", onboarding_graph)
+
+    # ── Support and error leaf nodes ──────────────────────────────────────────
+    builder.add_node("support", support_node)
+    builder.add_node("error_node", error_node)
+
+    # ── Edges ─────────────────────────────────────────────────────────────────
     builder.add_edge(START, "intake")
-    builder.add_edge("intake", "router")
-    builder.add_conditional_edges("router", route_by_intent, {
-        "claims": "claims",
-        "underwriting": "underwriting",
-        "support": "support",
-        "error": "error",
-    })
-    builder.add_conditional_edges("claims", route_after_claims, {
-        "fraud": "fraud",
-        "error": "error",
-    })
-    builder.add_conditional_edges("fraud", route_after_fraud, {
-        "approval": "approval",
-        "error": "error",
-    })
-    builder.add_conditional_edges("approval", route_after_approval, {
-        "human_review": "human_review",
-        END: END,
-    })
-    builder.add_edge("human_review", END)
-    builder.add_edge("underwriting", END)
-    builder.add_edge("support", END)
-    builder.add_edge("error", END)
+    builder.add_edge("intake", "supervisor")
+
+    # supervisor_node returns Command(goto=<domain>) so routing is implicit.
+    # All domain nodes and leaf nodes terminate to END.
+    for domain in ("claims", "underwriting", "billing", "marketing",
+                   "renewals", "onboarding", "support", "error_node"):
+        builder.add_edge(domain, END)
 
     return builder.compile(checkpointer=checkpointer)
 

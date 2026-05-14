@@ -1,3 +1,15 @@
+"""FastAPI application for the Agentic Insurance platform.
+
+Endpoints:
+  POST /tickets/submit           — universal entry point (any domain)
+  POST /tickets/{id}/review      — resume a human-in-the-loop interrupt
+  GET  /tickets/{id}/status      — inspect current persisted state
+  POST /billing/invoice          — trigger billing pipeline for a customer
+  POST /marketing/campaign       — trigger marketing pipeline for a customer
+  POST /renewals/check           — trigger renewal check for a policy
+  POST /onboarding/register      — onboard a new customer
+  GET  /health                   — liveness probe
+"""
 from __future__ import annotations
 
 import logging
@@ -15,19 +27,43 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from graph.main_graph import graph
-from schema.state import CustomerProfile
+from graph.main_graph import build_graph
+from schema.state import CustomerProfile, GlobalState
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Checkpointer setup
+# Use PostgresSaver when DATABASE_URL is set; fall back to MemorySaver for
+# local development so the server starts without a running Postgres instance.
+# ---------------------------------------------------------------------------
+_DATABASE_URL = os.getenv("DATABASE_URL")
+
+if _DATABASE_URL:
+    from langgraph.checkpoint.postgres import PostgresSaver
+    _checkpointer = PostgresSaver.from_conn_string(_DATABASE_URL)
+    _checkpointer.setup()
+else:
+    from langgraph.checkpoint.memory import MemorySaver
+    _checkpointer = MemorySaver()
+
+graph = build_graph(checkpointer=_checkpointer)
+
+# ---------------------------------------------------------------------------
 # Rate limiter (fix #4 — CWE-770)
 # ---------------------------------------------------------------------------
 limiter = Limiter(key_func=get_remote_address)
 
-app = FastAPI(title="Agentic Insurance API", version="0.1.0")
+app = FastAPI(
+    title="Agentic Insurance API",
+    version="2.0.0",
+    description=(
+        "Fully autonomous multi-agent insurance platform. "
+        "Handles claims, underwriting, billing, marketing, renewals, and onboarding."
+    ),
+)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -72,7 +108,6 @@ def _require_auth(
 # Request / response models
 # ---------------------------------------------------------------------------
 
-
 class SubmitTicketRequest(BaseModel):
     """ticket_id is intentionally absent — always generated server-side
     to prevent callers from overwriting existing tickets (fix #3 — CWE-639 IDOR).
@@ -116,6 +151,39 @@ class TicketStatusResponse(BaseModel):
     human_review_reason: str | None = None
 
 
+class BillingTriggerRequest(BaseModel):
+    customer_profile: CustomerProfile
+    ticket_id: str | None = None
+
+
+class MarketingTriggerRequest(BaseModel):
+    customer_profile: CustomerProfile
+    ticket_id: str | None = None
+
+
+class RenewalCheckRequest(BaseModel):
+    customer_profile: CustomerProfile
+    ticket_id: str | None = None
+
+
+class OnboardingRequest(BaseModel):
+    customer_profile: CustomerProfile
+    message: str = "I would like to register as a new customer."
+    ticket_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
+
+def _invoke(initial_state: GlobalState) -> dict:
+    config = {"configurable": {"thread_id": initial_state.ticket_id}}
+    result = graph.invoke(initial_state, config=config)
+    if isinstance(result, dict):
+        return result
+    return result.model_dump() if hasattr(result, "model_dump") else dict(result)
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -131,13 +199,12 @@ def submit_ticket(
     """Submit a new insurance ticket for processing."""
     # ticket_id is always generated server-side (fix #3 — CWE-639 IDOR).
     ticket_id = str(uuid.uuid4())
-    initial_state = {
-        "ticket_id": ticket_id,
-        "customer_profile": req.customer_profile,
-        "messages": [HumanMessage(content=req.message)],
-    }
-    config = {"configurable": {"thread_id": ticket_id}}
-    result = graph.invoke(initial_state, config=config)
+    initial_state = GlobalState(
+        ticket_id=ticket_id,
+        customer_profile=req.customer_profile,
+        messages=[HumanMessage(content=req.message)],
+    )
+    result = _invoke(initial_state)
     return TicketSubmitResponse(
         ticket_id=ticket_id,
         status=result.get("current_stage"),
@@ -165,10 +232,17 @@ def submit_review(
         Command(resume={"decision": req.decision, "reviewer_id": reviewer}),
         config=config,
     )
+    if isinstance(result, dict):
+        return TicketReviewResponse(
+            ticket_id=ticket_id,
+            status=result.get("current_stage"),
+            approval_status=result.get("approval_status"),
+        )
+    dumped = result.model_dump() if hasattr(result, "model_dump") else dict(result)
     return TicketReviewResponse(
         ticket_id=ticket_id,
-        status=result.get("current_stage"),
-        approval_status=result.get("approval_status"),
+        status=dumped.get("current_stage"),
+        approval_status=dumped.get("approval_status"),
     )
 
 
@@ -193,6 +267,62 @@ def get_ticket_status(
     )
 
 
+@app.post("/billing/invoice")
+def trigger_billing(req: BillingTriggerRequest) -> dict:
+    """Trigger the billing pipeline (invoice → payment → collections)."""
+    ticket_id = req.ticket_id or str(uuid.uuid4())
+    initial_state = GlobalState(
+        ticket_id=ticket_id,
+        customer_profile=req.customer_profile,
+        messages=[HumanMessage(content="Process billing invoice for this customer.")],
+    )
+    result = _invoke(initial_state)
+    return {"ticket_id": ticket_id, "status": result.get("current_stage"), "billing": result.get("billing")}
+
+
+@app.post("/marketing/campaign")
+def trigger_marketing(req: MarketingTriggerRequest) -> dict:
+    """Run the marketing pipeline to generate a personalised campaign offer."""
+    ticket_id = req.ticket_id or str(uuid.uuid4())
+    initial_state = GlobalState(
+        ticket_id=ticket_id,
+        customer_profile=req.customer_profile,
+        messages=[HumanMessage(content="Generate a targeted marketing offer for this customer.")],
+    )
+    result = _invoke(initial_state)
+    return {"ticket_id": ticket_id, "status": result.get("current_stage"), "marketing": result.get("marketing")}
+
+
+@app.post("/renewals/check")
+def trigger_renewal(req: RenewalCheckRequest) -> dict:
+    """Check policy expiry and execute renewal offer or auto-renewal."""
+    ticket_id = req.ticket_id or str(uuid.uuid4())
+    initial_state = GlobalState(
+        ticket_id=ticket_id,
+        customer_profile=req.customer_profile,
+        messages=[HumanMessage(content="Check and process policy renewal for this customer.")],
+    )
+    result = _invoke(initial_state)
+    return {"ticket_id": ticket_id, "status": result.get("current_stage"), "renewal": result.get("renewal")}
+
+
+@app.post("/onboarding/register")
+def onboard_customer(req: OnboardingRequest) -> dict:
+    """Onboard a new customer: KYC → risk profiling → policy assignment."""
+    ticket_id = req.ticket_id or str(uuid.uuid4())
+    initial_state = GlobalState(
+        ticket_id=ticket_id,
+        customer_profile=req.customer_profile,
+        messages=[HumanMessage(content=req.message)],
+    )
+    result = _invoke(initial_state)
+    return {
+        "ticket_id": ticket_id,
+        "status": result.get("current_stage"),
+        "onboarding": result.get("onboarding"),
+    }
+
+
 @app.get("/health")
-def health() -> dict:  # type: ignore[type-arg]
-    return {"status": "ok"}
+def health() -> dict:
+    return {"status": "ok", "version": "2.0.0", "checkpointer": type(_checkpointer).__name__}
