@@ -268,7 +268,7 @@ def get_ticket_status(
 
 
 @app.post("/billing/invoice")
-def trigger_billing(req: BillingTriggerRequest) -> dict:
+def trigger_billing(req: BillingTriggerRequest, _reviewer: str = Depends(_require_auth)) -> dict:
     """Trigger the billing pipeline (invoice → payment → collections)."""
     ticket_id = req.ticket_id or str(uuid.uuid4())
     initial_state = GlobalState(
@@ -281,7 +281,7 @@ def trigger_billing(req: BillingTriggerRequest) -> dict:
 
 
 @app.post("/marketing/campaign")
-def trigger_marketing(req: MarketingTriggerRequest) -> dict:
+def trigger_marketing(req: MarketingTriggerRequest, _reviewer: str = Depends(_require_auth)) -> dict:
     """Run the marketing pipeline to generate a personalised campaign offer."""
     ticket_id = req.ticket_id or str(uuid.uuid4())
     initial_state = GlobalState(
@@ -294,7 +294,7 @@ def trigger_marketing(req: MarketingTriggerRequest) -> dict:
 
 
 @app.post("/renewals/check")
-def trigger_renewal(req: RenewalCheckRequest) -> dict:
+def trigger_renewal(req: RenewalCheckRequest, _reviewer: str = Depends(_require_auth)) -> dict:
     """Check policy expiry and execute renewal offer or auto-renewal."""
     ticket_id = req.ticket_id or str(uuid.uuid4())
     initial_state = GlobalState(
@@ -307,7 +307,7 @@ def trigger_renewal(req: RenewalCheckRequest) -> dict:
 
 
 @app.post("/onboarding/register")
-def onboard_customer(req: OnboardingRequest) -> dict:
+def onboard_customer(req: OnboardingRequest, _reviewer: str = Depends(_require_auth)) -> dict:
     """Onboard a new customer: KYC → risk profiling → policy assignment."""
     ticket_id = req.ticket_id or str(uuid.uuid4())
     initial_state = GlobalState(
