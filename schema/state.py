@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import operator
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Annotated, Literal
 
 from langchain_core.messages import AnyMessage
@@ -17,7 +17,7 @@ class ToolCall(BaseModel):
 
 class AgentScratchpad(BaseModel):
     agent: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     action: str
     result: str
     tool_calls: list[ToolCall] = []

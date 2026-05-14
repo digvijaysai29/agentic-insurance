@@ -37,7 +37,7 @@ def claims_node(state: GlobalState) -> dict:
             "agent_scratchpad": [AgentScratchpad(
                 agent="claims",
                 action="lookup_policy",
-                result=f"ERROR: policy {policy_number} not found",
+                result="ERROR: policy not found",
                 tool_calls=[tool_call],
             )],
         }

@@ -29,7 +29,7 @@ def fraud_node(state: GlobalState) -> dict:
 
     tool_call = ToolCall(
         tool_name="search_fraud_patterns",
-        args={"query": query, "top_k": 5, "similarity_threshold": 0.85},
+        args={"policy_type": state.customer_profile.policy_type, "top_k": 5, "similarity_threshold": 0.85},
         result=f"{len(flags)} flag(s) found",
     )
 

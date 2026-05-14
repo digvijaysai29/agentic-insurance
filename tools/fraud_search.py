@@ -3,6 +3,10 @@ import os
 import numpy as np
 import psycopg2
 
+# WARNING: _embed() is a development stub. Replace with a real embedding model
+# (e.g. voyage-3 via Anthropic, or a sentence-transformer) before deploying to production.
+# The stub generates random vectors — fraud detection will NOT work with this implementation.
+
 
 def search_fraud_patterns(
     query: str,
@@ -45,6 +49,11 @@ def _embed(text: str) -> np.ndarray:
     Replace with a real embedding call (e.g. a sentence-transformer or the
     Anthropic embeddings API) before deploying to production.
     """
+    if os.environ.get("ENV", "development").lower() == "production":
+        raise RuntimeError(
+            "tools.fraud_search._embed is a stub and must not run in production. "
+            "Configure EMBEDDER_URL or integrate a real embedding model."
+        )
     rng = np.random.default_rng(hash(text) % (2**32))
     vec = rng.random(1536).astype(np.float32)
     return vec / np.linalg.norm(vec)
