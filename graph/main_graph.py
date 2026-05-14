@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.postgres import PostgresSaver
 
 from agents import (
     approval_node,
@@ -48,14 +50,25 @@ def build_graph(checkpointer=None):
 
     Args:
         checkpointer: Optional LangGraph checkpointer for state persistence
-            and human-in-the-loop resume. Defaults to MemorySaver for local
-            development; swap in PostgresSaver for production.
+            and human-in-the-loop resume. When ``None``, the checkpointer is
+            selected automatically:
+
+            * If the ``DATABASE_URL`` environment variable is set **and**
+              ``ENV`` is not ``"test"``, a ``PostgresSaver`` backed by that
+              connection string is used so that in-flight tickets (including
+              those paused at ``human_review``) survive process restarts.
+            * Otherwise a ``MemorySaver`` is used, which is safe for unit
+              tests and local development without a database.
 
     Returns:
         Compiled StateGraph ready for invocation.
     """
     if checkpointer is None:
-        checkpointer = MemorySaver()
+        database_url = os.environ.get("DATABASE_URL")
+        if database_url and os.environ.get("ENV") != "test":
+            checkpointer = PostgresSaver.from_conn_string(database_url)
+        else:
+            checkpointer = MemorySaver()
 
     builder = StateGraph(GlobalState)
 
